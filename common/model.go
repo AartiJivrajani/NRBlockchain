@@ -5,7 +5,19 @@ const (
 	BalanceTxn   = "Balance"
 	IncorrectTxn = "INCORRECT"
 	ValidTxn     = "VALIDTXN"
+
+	// Consensus Messages
+	Request = "REQUEST"
+
+	// server port
+	ServerPort = 8003
 )
+
+var ClientPortMap = map[int]int{
+	1: 8000,
+	2: 8001,
+	3: 8002,
+}
 
 type ServerRequest struct {
 	// request type could be balance or transaction
@@ -17,6 +29,10 @@ type ServerRequest struct {
 }
 
 type ClientEvent struct {
+}
+
+type ConsensusEvent struct {
+	Message string `json:"message"`
 }
 
 type ServerResponse struct {

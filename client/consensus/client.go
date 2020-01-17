@@ -4,6 +4,9 @@ import (
 	"NRBlockchain/common"
 	"NRBlockchain/lamport"
 	"context"
+	"encoding/json"
+	"golang.org/x/net/bpf"
+	"net"
 	"strconv"
 
 	log "github.com/Sirupsen/logrus"
@@ -11,8 +14,11 @@ import (
 )
 
 var (
-	Client      *BlockchainClient
-	GlobalClock = 0
+	Client           *BlockchainClient
+	GlobalClock      = 0
+	consensusMsgChan = make(chan *common.ConsensusEvent)
+	numMsg           = 0
+	allDoneChan      = make(chan bool)
 )
 
 // TODO: See if the client id and the lamport clock pid can be made the same for now
@@ -22,6 +28,7 @@ type BlockchainClient struct {
 	Clock      *lamport.LamportClock
 	Q          []int
 	Peers      []int
+	PeerConn   map[int]net.Conn
 }
 
 func GetClient(ctx context.Context, clientId int, portNumber int) *BlockchainClient {
@@ -34,6 +41,7 @@ func GetClient(ctx context.Context, clientId int, portNumber int) *BlockchainCli
 		ClientId:   clientId,
 		PortNumber: portNumber,
 		Peers:      make([]int, 2),
+		PeerConn:   make(map[int]net.Conn),
 	}
 }
 
@@ -62,23 +70,15 @@ func (client *BlockchainClient) registerClients(ctx context.Context) {
 	}
 }
 
-/*validate := func(input string) error {
-	_, err := strconv.ParseFloat(input, 64)
-	if err != nil {
-		return errors.New("Invalid number")
-	}
-	return nil
-}*/
-
 // startTransactions keeps a connection alive in order to receive any events from the rest of the clients
 func (client *BlockchainClient) startTransactions(ctx context.Context) {
 	var (
-		err error
+		err                       error
 		receiverClient, amountStr string
-		amount float64
-		transactionType string
-		receiverClientId int
-		txn string
+		amount                    float64
+		transactionType           string
+		receiverClientId          int
+		txn                       string
 	)
 	for {
 		prompt := promptui.Select{
@@ -109,7 +109,7 @@ func (client *BlockchainClient) startTransactions(ctx context.Context) {
 		case "Transfer":
 			txn = common.TransferTxn
 			prompt := promptui.Prompt{
-				Label:    "Receiver Client",
+				Label: "Receiver Client",
 				//Validate: validate,
 			}
 			receiverClient, err = prompt.Run()
@@ -121,8 +121,8 @@ func (client *BlockchainClient) startTransactions(ctx context.Context) {
 			}
 			receiverClientId, _ = strconv.Atoi(receiverClient)
 			prompt = promptui.Prompt{
-				Label:     "Amount to be transacted",
-				Default:   "",
+				Label:   "Amount to be transacted",
+				Default: "",
 			}
 			amountStr, err = prompt.Run()
 			if err != nil {
@@ -142,6 +142,93 @@ func (client *BlockchainClient) startTransactions(ctx context.Context) {
 	}
 }
 
+func (client *BlockchainClient) consensusEventListener(ctx context.Context, listener net.Listener) {
+
+	var (
+		err  error
+		conn net.Conn
+		resp *common.ConsensusEvent
+	)
+	// write the event first
+	defer listener.Close()
+	for {
+		conn, err = listener.Accept()
+		if err != nil {
+
+		}
+		d := json.NewDecoder(conn)
+		err = d.Decode(resp)
+		if err != nil {
+
+		}
+		consensusMsgChan <- resp
+	}
+}
+
+func (client *BlockchainClient) sendConsensusRequests(ctx context.Context, request *common.ServerRequest) {
+	var (
+		consensusReq *common.ConsensusEvent
+		err          error
+		conn         net.Conn
+		cReq         []byte
+		listener     net.Listener
+	)
+	consensusReq = &common.ConsensusEvent{Message: common.Request}
+	for peer := range client.Peers {
+		PORT := ":" + strconv.Itoa(common.ClientPortMap[peer])
+		listener, err = net.Listen("tcp", PORT)
+		if err != nil {
+			log.WithFields(log.Fields{
+				"clientId":         client.ClientId,
+				"connectingClient": peer,
+			}).Panic("error connecting to the client, shutting down...")
+			return
+		}
+		// send the consensus REQUEST message to this peer.
+		conn, err = listener.Accept()
+		if err != nil {
+
+		}
+		cReq, err = json.Marshal(consensusReq)
+		_, err = conn.Write(cReq)
+		if err != nil {
+
+		}
+		// for this client, wait for the ACKNOWLEDGEMENT response
+		go client.consensusEventListener(ctx, listener)
+	}
+
+}
+
+// getConsensus sends a request to each client and waits for an ACK from each of them.
+// once it receives an ACK from all the clients, it checks if it is at the head of the Priority Queue
+// if yes, it makes a request to the blockchain server followed by multi-casting a release message
+// to all the clients.
+func (client *BlockchainClient) getConsensus(ctx context.Context, request *common.ServerRequest) (bool){
+	go client.sendConsensusRequests(ctx, request)
+	// open a connection to each of the clients.
+	select {
+	case <-consensusMsgChan:
+		numMsg += 1
+		if numMsg >= 2 {
+			allDoneChan <- true
+		}
+	case <-allDoneChan:
+		numMsg = 0
+		return true
+	}
+}
+
 func (client *BlockchainClient) sendRequest(ctx context.Context, request *common.ServerRequest) {
+	var (
+		allClientResponse bool
+		listener net.Listener
+		err error
+	)
+
+	allClientResponse = client.getConsensus(ctx, request)
+	PORT := ":" + strconv.Itoa(common.ServerPort)
+	listener, err = net.Dial("tcp", PORT)
+
 
 }

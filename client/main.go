@@ -42,7 +42,7 @@ func main() {
 	flag.IntVar(&clientId, "client_id", 1, "client ID(0, 1, 2)")
 	flag.Parse()
 
-	// perform the pre-app kickstart ceremonies
+	// perform the pre-app kick start ceremonies
 	ctx, cancel := context.WithCancel(context.Background())
 	configureLogger(logLevel)
 
