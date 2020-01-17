@@ -1,4 +1,4 @@
-package server
+package main
 
 import (
 	"NRBlockchain/server/blockchain"
@@ -38,7 +38,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	// parse all the command line arguments
 	flag.StringVar(&logLevel, "level", "DEBUG", "Set log level.")
-	flag.IntVar(&portNumber, "port_number", 9000, "port on which the client needs to start")
+	flag.IntVar(&portNumber, "port_number", 8003, "port on which the client needs to start")
 	flag.Parse()
 
 	configureLogger(logLevel)

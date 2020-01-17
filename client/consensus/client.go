@@ -5,7 +5,6 @@ import (
 	"NRBlockchain/lamport"
 	"context"
 	"encoding/json"
-	"golang.org/x/net/bpf"
 	"net"
 	"strconv"
 
@@ -52,6 +51,7 @@ func GetClient(ctx context.Context, clientId int, portNumber int) *BlockchainCli
 func (client *BlockchainClient) Start(ctx context.Context) {
 	client.registerClients(ctx)
 	go client.startTransactions(ctx)
+	go client.GetConsensus(ctx)
 }
 
 func (client *BlockchainClient) registerClients(ctx context.Context) {
@@ -101,6 +101,7 @@ func (client *BlockchainClient) startTransactions(ctx context.Context) {
 			log.Debug("Fun doing business with you, see you soon!")
 			return
 		case "Show Balance":
+			log.Debug("sending request to server....")
 			txn = common.BalanceTxn
 			client.sendRequest(ctx, &common.ServerRequest{
 				TxnType:  txn,
@@ -165,7 +166,7 @@ func (client *BlockchainClient) consensusEventListener(ctx context.Context, list
 	}
 }
 
-func (client *BlockchainClient) sendConsensusRequests(ctx context.Context, request *common.ServerRequest) {
+func (client *BlockchainClient) sendConsensusRequests(ctx context.Context) {
 	var (
 		consensusReq *common.ConsensusEvent
 		err          error
@@ -204,8 +205,8 @@ func (client *BlockchainClient) sendConsensusRequests(ctx context.Context, reque
 // once it receives an ACK from all the clients, it checks if it is at the head of the Priority Queue
 // if yes, it makes a request to the blockchain server followed by multi-casting a release message
 // to all the clients.
-func (client *BlockchainClient) getConsensus(ctx context.Context, request *common.ServerRequest) (bool){
-	go client.sendConsensusRequests(ctx, request)
+func (client *BlockchainClient) GetConsensus(ctx context.Context) bool {
+	go client.sendConsensusRequests(ctx)
 	// open a connection to each of the clients.
 	select {
 	case <-consensusMsgChan:
@@ -217,18 +218,40 @@ func (client *BlockchainClient) getConsensus(ctx context.Context, request *commo
 		numMsg = 0
 		return true
 	}
+	return false
 }
 
 func (client *BlockchainClient) sendRequest(ctx context.Context, request *common.ServerRequest) {
 	var (
-		allClientResponse bool
-		listener net.Listener
-		err error
+		err  error
+		conn net.Conn
+		jReq []byte
+		resp *common.ServerResponse
 	)
-
-	allClientResponse = client.getConsensus(ctx, request)
+	log.Debug("in sendRequest method")
 	PORT := ":" + strconv.Itoa(common.ServerPort)
-	listener, err = net.Dial("tcp", PORT)
+	conn, err = net.Dial("tcp", PORT)
+	if err != nil {
+		log.WithFields(log.Fields{
+			"err":       err.Error(),
+			"client_id": client.ClientId,
+		}).Error("error connecting to the server")
+		return
+	}
+	jReq, _ = json.Marshal(request)
 
-
+	//conn, err = listener.Accept()
+	conn.Write(jReq)
+	//_, _ = fmt.Fprintf(conn, string(jReq))
+	d := json.NewDecoder(conn)
+	err = d.Decode(&resp)
+	if err != nil {
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+		}).Error("error connecting to the TCP socket to initiate the read, shutting down...")
+		return
+	}
+	log.WithFields(log.Fields{
+		"msg": resp,
+	}).Debug("Received message from the server")
 }

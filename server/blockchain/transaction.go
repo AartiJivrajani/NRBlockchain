@@ -11,7 +11,7 @@ func (server *BlockchainServer) GetBalance(ctx context.Context,
 	var (
 		balance float64
 	)
-	for block := server.BlockChain.Front(); block != nil; block = block.Next() {
+	for block := BlockChain.Front(); block != nil; block = block.Next() {
 		if block.Value.(Transaction).Recvr == requestMsg.ClientId {
 			balance += block.Value.(Transaction).Amount
 		}
