@@ -1,13 +1,16 @@
 package common
 
+import "NRBlockchain/lamport"
+
 const (
 	TransferTxn  = "Transfer"
 	BalanceTxn   = "Balance"
 	IncorrectTxn = "INCORRECT"
 	ValidTxn     = "VALIDTXN"
-
 	// Consensus Messages
 	Request = "REQUEST"
+	Ack     = "ACK"
+	Release = "RELEASE"
 
 	// server port
 	ServerPort = 8003
@@ -32,7 +35,10 @@ type ClientEvent struct {
 }
 
 type ConsensusEvent struct {
-	Message string `json:"message"`
+	Message      string                `json:"message"`
+	SourceClient int                   `json:"source_client"`
+	DestClient   int                   `json:"dest_client"`
+	CurrentClock *lamport.LamportClock `json:"clock"`
 }
 
 type ServerResponse struct {
