@@ -39,7 +39,7 @@ func main() {
 	// parse all the command line arguments
 	flag.StringVar(&logLevel, "level", "DEBUG", "Set log level.")
 	flag.IntVar(&portNumber, "port_number", 8000, "port on which the client needs to start")
-	flag.IntVar(&clientId, "client_id", 1, "client ID(0, 1, 2)")
+	flag.IntVar(&clientId, "client_id", 1, "client ID(1, 2, 3)")
 	flag.Parse()
 
 	// perform the pre-app kick start ceremonies

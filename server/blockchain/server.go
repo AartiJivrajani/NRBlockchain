@@ -11,7 +11,10 @@ import (
 	log "github.com/Sirupsen/logrus"
 )
 
-var Server *BlockchainServer
+var (
+	Server      *BlockchainServer
+	GlobalClock = 0
+)
 
 type BlockchainServer struct {
 	Port       int

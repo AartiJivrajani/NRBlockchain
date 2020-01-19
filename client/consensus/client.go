@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"time"
+
+	"github.com/jpillora/backoff"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/manifoldco/promptui"
@@ -40,7 +43,7 @@ func GetClient(ctx context.Context, clientId int, portNumber int) *BlockchainCli
 		},
 		Q:           make([]int, 3),
 		ClientId:    clientId,
-		PortNumber:  portNumber,
+		PortNumber:  common.ClientPortMap[clientId],
 		Peers:       make([]int, 2),
 		PeerConnMap: make(map[int]net.Conn),
 	}
@@ -108,6 +111,7 @@ func (client *BlockchainClient) processClientMessages(ctx context.Context) {
 	for {
 		select {
 		case msg := <-consensusMsgChan:
+			log.Debug(msg)
 			if msg.Message == common.Ack {
 				numMsg += 1
 				if numMsg >= 2 {
@@ -128,7 +132,7 @@ func (client *BlockchainClient) processClientMessages(ctx context.Context) {
 						PID:       client.ClientId,
 					},
 				}
-				client.sendSingleMessage(ctx, client.PeerConnMap[msg.SourceClient], msg)
+				client.sendSingleMessage(ctx, client.PeerConnMap[msg.DestClient], msg)
 			} else if msg.Message == common.Release {
 				// TODO: Take care of release messages
 			}
@@ -145,8 +149,8 @@ func (client *BlockchainClient) processClientMessages(ctx context.Context) {
 // 3. Logs the essential information needed
 func (client *BlockchainClient) Start(ctx context.Context) {
 	client.registerClients(ctx)
-	client.establishPeerConnections(ctx)
 	go client.startPeerListener(ctx)
+	go client.establishPeerConnections(ctx)
 
 	// wait for the peer listener to start before we allow the transactions to begin
 	<-transactionStart
@@ -157,18 +161,17 @@ func (client *BlockchainClient) Start(ctx context.Context) {
 
 // registerClients detects each peer that it has and stores its connection object
 func (client *BlockchainClient) registerClients(ctx context.Context) {
-
 	log.WithFields(log.Fields{
 		"clientId":    client.ClientId,
 		"clientClock": client.Clock.Timestamp,
 	}).Debug("Registering the clients")
 
-	if client.ClientId == 0 {
-		client.Peers = append(client.Peers, []int{1, 2}...)
-	} else if client.ClientId == 1 {
-		client.Peers = append(client.Peers, []int{0, 2}...)
+	if client.ClientId == 1 {
+		client.Peers = []int{2, 3} //append(client.Peers, []int{2, 3}...)
 	} else if client.ClientId == 2 {
-		client.Peers = append(client.Peers, []int{0, 1}...)
+		client.Peers = []int{1, 3} //append(client.Peers, []int{1, 3}...)
+	} else if client.ClientId == 3 {
+		client.Peers = []int{1, 2} //append(client.Peers, []int{1, 2}...)
 	}
 }
 
@@ -201,7 +204,7 @@ func (client *BlockchainClient) startTransactions(ctx context.Context) {
 		}).Debug("You choose...")
 		switch transactionType {
 		case "Exit":
-			log.Debug("Fun doing business with you, see you soon!")
+			log.Panic("Fun doing business with you, see you soon!")
 			return
 		case "Show Balance":
 			log.Debug("sending request to server....")
@@ -250,20 +253,44 @@ func (client *BlockchainClient) establishPeerConnections(ctx context.Context) {
 	var (
 		err  error
 		conn net.Conn
+		d    time.Duration
+		b    = &backoff.Backoff{
+			Min:    10 * time.Second,
+			Max:    1 * time.Minute,
+			Factor: 2,
+			Jitter: true,
+		}
 	)
+
 	log.WithFields(log.Fields{
 		"client_id": client.ClientId,
+		"peer_list": client.Peers,
 	}).Debug("establishing peer connections with other clients")
-	for peer := range client.Peers {
+	for _, peer := range client.Peers {
 		PORT := ":" + strconv.Itoa(common.ClientPortMap[peer])
-		conn, err = net.Dial("tcp", PORT)
-		if err != nil {
-			log.WithFields(log.Fields{
-				"error":          err.Error(),
-				"client_id":      client.ClientId,
-				"peer_client_id": peer,
-			}).Error("error connecting to the client")
-			// TODO: backoff and retry?
+		d = b.Duration()
+		for {
+			conn, err = net.Dial("tcp", PORT)
+			if err != nil {
+				log.WithFields(log.Fields{
+					"error":          err.Error(),
+					"client_id":      client.ClientId,
+					"peer_client_id": peer,
+				}).Error("error connecting to the client")
+				// if the connection fails, try to connect 3 times, post which just exit.
+				if b.Attempt() <= 3 {
+					time.Sleep(d)
+					continue
+				} else {
+					log.Panic("Unable to connect to the peers")
+				}
+			} else {
+				log.WithFields(log.Fields{
+					"client_id":      client.ClientId,
+					"peer_client_id": peer,
+				}).Debug("Established connection with peer client")
+				break
+			}
 		}
 		client.PeerConnMap[peer] = conn
 	}
@@ -284,10 +311,13 @@ func (client *BlockchainClient) GetConsensus(ctx context.Context) error {
 		SourceClient: client.ClientId,
 		DestClient:   0,
 		// TODO: Populate this clock correctly
-		CurrentClock: nil,
+		CurrentClock: &lamport.LamportClock{
+			Timestamp: GlobalClock,
+			PID:       client.ClientId,
+		},
 	}
 
-	for peer := range client.Peers {
+	for _, peer := range client.Peers {
 		if client.PeerConnMap[peer] == nil {
 			log.WithFields(log.Fields{
 				"client_id":      client.ClientId,
@@ -299,7 +329,11 @@ func (client *BlockchainClient) GetConsensus(ctx context.Context) error {
 		cReq, err = json.Marshal(consensusReq)
 		_, err = client.PeerConnMap[peer].Write(cReq)
 		if err != nil {
-
+			log.WithFields(log.Fields{
+				"client":             client.ClientId,
+				"destination_client": peer,
+				"error":              err.Error(),
+			}).Panic("error writing to the destination client")
 		}
 	}
 	if err != nil {
@@ -310,7 +344,28 @@ func (client *BlockchainClient) GetConsensus(ctx context.Context) error {
 }
 
 func (client *BlockchainClient) sendSingleMessage(ctx context.Context, conn net.Conn, msg *common.ConsensusEvent) {
+	var (
+		jMsg []byte
+		err  error
+	)
+	log.WithFields(log.Fields{
+		"from_client": client.ClientId,
+		"to_client":   msg.DestClient,
+		"msg":         msg,
+	}).Debug("sending response back to the peer")
 
+	jMsg, _ = json.Marshal(msg)
+	_, err = conn.Write(jMsg)
+	if err != nil {
+		log.WithFields(log.Fields{
+			"error":       err.Error(),
+			"from_client": client.ClientId,
+			"to_client":   msg.DestClient,
+			"msg":         msg,
+		}).Error("error writing msg to the client socket")
+		// TODO: Backoff and retry?
+		return
+	}
 }
 
 func (client *BlockchainClient) sendRequestToServer(ctx context.Context, request *common.ServerRequest) {
