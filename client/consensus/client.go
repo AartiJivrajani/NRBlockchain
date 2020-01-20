@@ -149,7 +149,7 @@ func (client *BlockchainClient) processClientMessages(ctx context.Context) {
 					},
 				}
 				//sleep for sometime before sending back the ack
-				//time.Sleep(5 * time.Second)
+				time.Sleep(5 * time.Second)
 				client.sendSingleMessage(ctx, client.PeerConnMap[msg.DestClient], msg)
 
 				log.WithFields(log.Fields{
@@ -157,18 +157,30 @@ func (client *BlockchainClient) processClientMessages(ctx context.Context) {
 				}).Debug("Client Request Q")
 
 			} else if msg.Message == common.Release {
-				log.Debug("Release message received")
+				log.WithFields(log.Fields{
+					"client_id":   client.ClientId,
+					"from_client": msg.SourceClient,
+					"list":        client.printRequestQ(ctx),
+				}).Debug("Release message received")
 				client.updateGlobalClock(ctx, msg)
+
+				// remove the first element from the list
+				e := client.Q.Front()
+				if e != nil {
+					client.Q.Remove(e)
+				}
+
 				// once a release message is received, check the head of the queue,
 				// if it is the same as the client, the client has the lock on the resource
-				if client.Q.Front().Value.(*common.ConsensusEvent).SourceClient == client.ClientId {
+				if client.Q.Front() != nil && client.Q.Front().Value.(*common.ConsensusEvent).SourceClient == client.ClientId {
 					log.Debug("client found itself in front of the q... sending request to server")
 					client.sendRequestToServer(ctx, client.Q.Front().Value.(*common.ConsensusEvent).Request, false)
 				}
-				// remove the first element from the list
-				e := client.Q.Front()
-				client.Q.Remove(e)
-				client.printRequestQ(ctx)
+				log.WithFields(log.Fields{
+					"list":      client.printRequestQ(ctx),
+					"client_id": client.ClientId,
+				}).Debug("after release request processing")
+				//client.printRequestQ(ctx)
 			}
 		}
 	}
@@ -431,14 +443,6 @@ func (client *BlockchainClient) sendRequestToServer(ctx context.Context, request
 		jReq []byte
 		resp *common.ServerResponse
 	)
-	if checkForLock {
-		err = client.GetConsensus(ctx, request)
-		if err != nil {
-			log.Error("Consensus not reached")
-			return
-		}
-		<-sendToServerChan
-	}
 	// push this client request to its own queue
 	client.Q.PushBack(&common.ConsensusEvent{
 		Request:      request,
@@ -450,6 +454,14 @@ func (client *BlockchainClient) sendRequestToServer(ctx context.Context, request
 			PID:       client.ClientId,
 		},
 	})
+	if checkForLock {
+		err = client.GetConsensus(ctx, request)
+		if err != nil {
+			log.Error("Consensus not reached")
+			return
+		}
+		<-sendToServerChan
+	}
 	if client.Q.Front() != nil && client.Q.Front().Value.(*common.ConsensusEvent).SourceClient != client.ClientId {
 		log.WithFields(log.Fields{
 			"client_id": client.ClientId,
@@ -485,6 +497,7 @@ func (client *BlockchainClient) sendRequestToServer(ctx context.Context, request
 		client.Q.Remove(e)
 	}
 	client.sendReleaseMessage(ctx)
+
 }
 
 func (client *BlockchainClient) sendReleaseMessage(ctx context.Context) {
