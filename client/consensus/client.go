@@ -3,9 +3,11 @@ package consensus
 import (
 	"NRBlockchain/common"
 	"NRBlockchain/lamport"
+	"container/list"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/manifoldco/promptui"
 	"net"
 	"strconv"
 	"time"
@@ -13,7 +15,6 @@ import (
 	"github.com/jpillora/backoff"
 
 	log "github.com/Sirupsen/logrus"
-	"github.com/manifoldco/promptui"
 )
 
 var (
@@ -22,6 +23,7 @@ var (
 	consensusMsgChan = make(chan *common.ConsensusEvent)
 	numMsg           = 0
 	allDoneChan      = make(chan bool)
+	//sendToServerChan = make(chan bool)
 	transactionStart = make(chan bool)
 )
 
@@ -30,7 +32,7 @@ type BlockchainClient struct {
 	ClientId    int
 	PortNumber  int
 	Clock       *lamport.LamportClock
-	Q           []int
+	Q           *list.List
 	Peers       []int
 	PeerConnMap map[int]net.Conn
 }
@@ -41,7 +43,7 @@ func GetClient(ctx context.Context, clientId int, portNumber int) *BlockchainCli
 			Timestamp: 0,
 			PID:       0,
 		},
-		Q:           make([]int, 3),
+		Q:           list.New(),
 		ClientId:    clientId,
 		PortNumber:  common.ClientPortMap[clientId],
 		Peers:       make([]int, 2),
@@ -96,13 +98,22 @@ func (client *BlockchainClient) startPeerListener(ctx context.Context) {
 }
 
 func (client *BlockchainClient) updateGlobalClock(ctx context.Context, msg *common.ConsensusEvent) {
-	msgClock := msg.CurrentClock.Timestamp
-	// TODO: Take care of the case when msgClock == GlobalClock
-	if msgClock > GlobalClock {
-		GlobalClock = msgClock + 1
-	} else {
+	// in case of client sending a message to the server, the consensus event will be nil
+	if msg == nil {
 		GlobalClock += 1
+	} else {
+		msgClock := msg.CurrentClock.Timestamp
+		// TODO: Take care of the case when msgClock == GlobalClock
+		if msgClock > GlobalClock {
+			GlobalClock = msgClock + 1
+		} else {
+			GlobalClock += 1
+		}
 	}
+	log.WithFields(log.Fields{
+		"client_id": client.ClientId,
+		"clock":     GlobalClock,
+	}).Debug("updated the clock")
 }
 
 // processClientMessages essentially gathers all the messages a client may receive...
@@ -111,17 +122,19 @@ func (client *BlockchainClient) processClientMessages(ctx context.Context) {
 	for {
 		select {
 		case msg := <-consensusMsgChan:
-			log.Debug(msg)
 			if msg.Message == common.Ack {
 				numMsg += 1
+				log.Debug("received an ack")
 				if numMsg >= 2 {
+					log.WithFields(log.Fields{
+						"client_id": client.ClientId,
+					}).Info("Received ACK from all the clients")
 					allDoneChan <- true
+					continue
 				}
 			} else if msg.Message == common.Request {
 				// process the request received from the other clients
-				client.Q = append(client.Q, msg.SourceClient)
-				client.updateGlobalClock(ctx, msg)
-
+				client.Q.PushBack(msg)
 				// send an ACK message to the requesting client.
 				msg := &common.ConsensusEvent{
 					Message:      common.Ack,
@@ -133,12 +146,27 @@ func (client *BlockchainClient) processClientMessages(ctx context.Context) {
 					},
 				}
 				client.sendSingleMessage(ctx, client.PeerConnMap[msg.DestClient], msg)
+				client.printRequestQ(ctx, client.Q)
 			} else if msg.Message == common.Release {
-				// TODO: Take care of release messages
+				log.Debug("Release message received")
+				client.updateGlobalClock(ctx, msg)
+				// once a release message is received, check the head of the queue,
+				// if it is the same as the client, the client has the lock on the resource
+				if client.Q.Front().Value.(*common.ConsensusEvent).SourceClient == client.ClientId {
+					log.Debug("client found itself in front of the q... sending request to server")
+					client.sendRequestToServer(ctx, client.Q.Front().Value.(*common.ConsensusEvent).Request, false)
+				}
+				// remove the first element from the list
+				e := client.Q.Front()
+				client.Q.Remove(e)
+				client.printRequestQ(ctx, client.Q)
 			}
 		case <-allDoneChan:
 			numMsg = 0
-			return
+			//sendToServerChan <- true
+			//return
+			//default:
+			//	continue
 		}
 	}
 }
@@ -150,11 +178,9 @@ func (client *BlockchainClient) processClientMessages(ctx context.Context) {
 func (client *BlockchainClient) Start(ctx context.Context) {
 	client.registerClients(ctx)
 	go client.startPeerListener(ctx)
-	go client.establishPeerConnections(ctx)
-
+	client.establishPeerConnections(ctx)
 	// wait for the peer listener to start before we allow the transactions to begin
-	<-transactionStart
-
+	//<-transactionStart
 	go client.processClientMessages(ctx)
 	go client.startTransactions(ctx)
 }
@@ -186,6 +212,21 @@ func (client *BlockchainClient) startTransactions(ctx context.Context) {
 		receiverClientId          int
 		txn                       string
 	)
+	//for {
+	//	fmt.Println("enter the operation choice")
+	//	_, _ = fmt.Scanln(&transactionType)
+	//	switch transactionType {
+	//	case "Exit":
+	//		log.Panic("Fun doing business with you, see you soon!")
+	//		return
+	//	case "Balance":
+	//		txn = common.BalanceTxn
+	//		client.sendRequestToServer(ctx, &common.ServerRequest{
+	//			TxnType:  txn,
+	//			ClientId: client.ClientId,
+	//		}, true)
+	//	}
+	//}
 	for {
 		prompt := promptui.Select{
 			Label: "Select Transaction",
@@ -207,12 +248,11 @@ func (client *BlockchainClient) startTransactions(ctx context.Context) {
 			log.Panic("Fun doing business with you, see you soon!")
 			return
 		case "Show Balance":
-			log.Debug("sending request to server....")
 			txn = common.BalanceTxn
 			client.sendRequestToServer(ctx, &common.ServerRequest{
 				TxnType:  txn,
 				ClientId: client.ClientId,
-			})
+			}, true)
 		case "Transfer":
 			txn = common.TransferTxn
 			prompt := promptui.Prompt{
@@ -227,6 +267,10 @@ func (client *BlockchainClient) startTransactions(ctx context.Context) {
 				continue
 			}
 			receiverClientId, _ = strconv.Atoi(receiverClient)
+			if receiverClientId == client.ClientId {
+				log.Error("you cant send money to yourself!")
+				continue
+			}
 			prompt = promptui.Prompt{
 				Label:   "Amount to be transacted",
 				Default: "",
@@ -244,7 +288,7 @@ func (client *BlockchainClient) startTransactions(ctx context.Context) {
 				ClientId: client.ClientId,
 				Amount:   amount,
 				Rcvr:     receiverClientId,
-			})
+			}, true)
 		}
 	}
 }
@@ -300,7 +344,7 @@ func (client *BlockchainClient) establishPeerConnections(ctx context.Context) {
 // once it receives an ACK from all the clients, it checks if it is at the head of the Priority Queue
 // if yes, it makes a request to the blockchain server followed by multi-casting a release message
 // to all the clients.
-func (client *BlockchainClient) GetConsensus(ctx context.Context) error {
+func (client *BlockchainClient) GetConsensus(ctx context.Context, request *common.ServerRequest) error {
 	var (
 		consensusReq *common.ConsensusEvent
 		err          error
@@ -315,6 +359,7 @@ func (client *BlockchainClient) GetConsensus(ctx context.Context) error {
 			Timestamp: GlobalClock,
 			PID:       client.ClientId,
 		},
+		Request: request,
 	}
 
 	for _, peer := range client.Peers {
@@ -325,6 +370,11 @@ func (client *BlockchainClient) GetConsensus(ctx context.Context) error {
 			}).Panic("no pre-established connection found, exiting now...")
 			return fmt.Errorf("no pre-established connection found")
 		}
+		log.WithFields(log.Fields{
+			"client_id":             client.ClientId,
+			"destination_client_id": peer,
+		}).Info("Sending Request to clients")
+
 		consensusReq.DestClient = peer
 		cReq, err = json.Marshal(consensusReq)
 		_, err = client.PeerConnMap[peer].Write(cReq)
@@ -335,6 +385,7 @@ func (client *BlockchainClient) GetConsensus(ctx context.Context) error {
 				"error":              err.Error(),
 			}).Panic("error writing to the destination client")
 		}
+
 	}
 	if err != nil {
 		log.Error(err.Error())
@@ -353,7 +404,6 @@ func (client *BlockchainClient) sendSingleMessage(ctx context.Context, conn net.
 		"to_client":   msg.DestClient,
 		"msg":         msg,
 	}).Debug("sending response back to the peer")
-
 	jMsg, _ = json.Marshal(msg)
 	_, err = conn.Write(jMsg)
 	if err != nil {
@@ -366,18 +416,28 @@ func (client *BlockchainClient) sendSingleMessage(ctx context.Context, conn net.
 		// TODO: Backoff and retry?
 		return
 	}
+	client.updateGlobalClock(ctx, msg)
 }
 
-func (client *BlockchainClient) sendRequestToServer(ctx context.Context, request *common.ServerRequest) {
+func (client *BlockchainClient) sendRequestToServer(ctx context.Context, request *common.ServerRequest, checkForLock bool) {
 	var (
 		err  error
 		conn net.Conn
 		jReq []byte
 		resp *common.ServerResponse
 	)
-	err = client.GetConsensus(ctx)
-	if err != nil {
-		log.Error("Consensus not reached")
+	if checkForLock {
+		err = client.GetConsensus(ctx, request)
+		if err != nil {
+			log.Error("Consensus not reached")
+			return
+		}
+		//<-sendToServerChan
+	}
+	if client.Q.Front() != nil && client.Q.Front().Value.(*common.ConsensusEvent).SourceClient != client.ClientId {
+		log.WithFields(log.Fields{
+			"client_id": client.ClientId,
+		}).Debug("Received all ACKs, but critical section cant be accessed just yet.")
 		return
 	}
 	PORT := ":" + strconv.Itoa(common.ServerPort)
@@ -389,6 +449,7 @@ func (client *BlockchainClient) sendRequestToServer(ctx context.Context, request
 		}).Error("error connecting to the server")
 		return
 	}
+	client.updateGlobalClock(ctx, nil)
 	jReq, _ = json.Marshal(request)
 	conn.Write(jReq)
 	d := json.NewDecoder(conn)
@@ -402,4 +463,11 @@ func (client *BlockchainClient) sendRequestToServer(ctx context.Context, request
 	log.WithFields(log.Fields{
 		"msg": resp,
 	}).Debug("Received message from the server")
+}
+
+func (client *BlockchainClient) printRequestQ(ctx context.Context, q *list.List) {
+	for block := q.Front(); block != nil; block = block.Next() {
+		fmt.Printf("%d -> ", block.Value.(*common.ConsensusEvent).SourceClient)
+	}
+	fmt.Println()
 }

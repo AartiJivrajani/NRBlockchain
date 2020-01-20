@@ -35,6 +35,7 @@ type ClientEvent struct {
 }
 
 type ConsensusEvent struct {
+	Request      *ServerRequest        `json:"server_request,omitempty"`
 	Message      string                `json:"message"`
 	SourceClient int                   `json:"source_client"`
 	DestClient   int                   `json:"dest_client"`

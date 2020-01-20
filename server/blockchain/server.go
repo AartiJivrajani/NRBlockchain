@@ -63,7 +63,7 @@ func (server *BlockchainServer) handleConnections(ctx context.Context, c net.Con
 		if err != nil {
 			log.WithFields(log.Fields{
 				"error": err.Error(),
-			}).Error("error decoding request recvd from the server")
+			}).Error("error decoding request recvd from the client")
 			continue
 		}
 		log.WithFields(log.Fields{
@@ -83,10 +83,18 @@ func (server *BlockchainServer) serveRequest(ctx context.Context, c net.Conn, re
 	case common.BalanceTxn:
 		serverResp, _ = server.BalanceTransaction(ctx, requestMsg)
 		resp, _ = json.Marshal(serverResp)
+		log.WithFields(log.Fields{
+			"resp":      serverResp,
+			"client_id": requestMsg.ClientId,
+		}).Debug("sending resp back to client")
 		c.Write(resp)
 	case common.TransferTxn:
 		serverResp, _ = server.TransferTransaction(ctx, requestMsg)
 		resp, _ = json.Marshal(serverResp)
+		log.WithFields(log.Fields{
+			"resp":      serverResp,
+			"client_id": requestMsg.ClientId,
+		}).Debug("sending resp back to client")
 		c.Write(resp)
 	}
 }
