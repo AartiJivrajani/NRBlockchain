@@ -149,9 +149,13 @@ func (client *BlockchainClient) processClientMessages(ctx context.Context) {
 					},
 				}
 				//sleep for sometime before sending back the ack
-				time.Sleep(5 * time.Second)
+				//time.Sleep(5 * time.Second)
 				client.sendSingleMessage(ctx, client.PeerConnMap[msg.DestClient], msg)
-				client.printRequestQ(ctx, client.Q)
+
+				log.WithFields(log.Fields{
+					"list": client.printRequestQ(ctx),
+				}).Debug("Client Request Q")
+
 			} else if msg.Message == common.Release {
 				log.Debug("Release message received")
 				client.updateGlobalClock(ctx, msg)
@@ -164,14 +168,8 @@ func (client *BlockchainClient) processClientMessages(ctx context.Context) {
 				// remove the first element from the list
 				e := client.Q.Front()
 				client.Q.Remove(e)
-				client.printRequestQ(ctx, client.Q)
+				client.printRequestQ(ctx)
 			}
-			//case <-allDoneChan:
-			//numMsg = 0
-			//sendToServerChan <- true
-			//return
-			//default:
-			//	continue
 		}
 	}
 }
@@ -388,23 +386,40 @@ func (client *BlockchainClient) sendSingleMessage(ctx context.Context, conn net.
 	var (
 		jMsg []byte
 		err  error
+		d    time.Duration
+		b    = &backoff.Backoff{
+			Min:    1 * time.Second,
+			Max:    10 * time.Minute,
+			Factor: 2,
+			Jitter: true,
+		}
 	)
 	log.WithFields(log.Fields{
 		"from_client": client.ClientId,
 		"to_client":   msg.DestClient,
 		"msg":         msg,
 	}).Debug("sending message to the peer")
+	d = b.Duration()
 	jMsg, _ = json.Marshal(msg)
-	_, err = conn.Write(jMsg)
-	if err != nil {
-		log.WithFields(log.Fields{
-			"error":       err.Error(),
-			"from_client": client.ClientId,
-			"to_client":   msg.DestClient,
-			"msg":         msg,
-		}).Error("error writing msg to the client socket")
-		// TODO: Backoff and retry?
-		return
+	for {
+		_, err = conn.Write(jMsg)
+		if err != nil {
+			log.WithFields(log.Fields{
+				"error":       err.Error(),
+				"from_client": client.ClientId,
+				"to_client":   msg.DestClient,
+				"msg":         msg,
+			}).Error("error writing msg to the client socket")
+			if b.Attempt() <= 3 {
+				time.Sleep(d)
+				continue
+			} else {
+				log.Panic("Unable to connect to the peers")
+				break
+			}
+		} else {
+			break
+		}
 	}
 	client.updateGlobalClock(ctx, msg)
 }
@@ -424,9 +439,21 @@ func (client *BlockchainClient) sendRequestToServer(ctx context.Context, request
 		}
 		<-sendToServerChan
 	}
+	// push this client request to its own queue
+	client.Q.PushBack(&common.ConsensusEvent{
+		Request:      request,
+		Message:      common.Request,
+		SourceClient: client.ClientId,
+		DestClient:   0,
+		CurrentClock: &lamport.LamportClock{
+			Timestamp: GlobalClock,
+			PID:       client.ClientId,
+		},
+	})
 	if client.Q.Front() != nil && client.Q.Front().Value.(*common.ConsensusEvent).SourceClient != client.ClientId {
 		log.WithFields(log.Fields{
 			"client_id": client.ClientId,
+			"list":      client.printRequestQ(ctx),
 		}).Debug("Received all ACKs, but critical section cant be accessed just yet.")
 		return
 	}
@@ -475,10 +502,10 @@ func (client *BlockchainClient) sendReleaseMessage(ctx context.Context) {
 	}
 }
 
-func (client *BlockchainClient) printRequestQ(ctx context.Context, q *list.List) {
-	for block := q.Front(); block != nil; block = block.Next() {
-
-		fmt.Printf("%d -> ", block.Value.(*common.ConsensusEvent).SourceClient)
+func (client *BlockchainClient) printRequestQ(ctx context.Context) string {
+	var l string
+	for block := client.Q.Front(); block != nil; block = block.Next() {
+		l = l + strconv.Itoa(block.Value.(*common.ConsensusEvent).SourceClient) + "->"
 	}
-	fmt.Println()
+	return l
 }
