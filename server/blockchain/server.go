@@ -13,7 +13,6 @@ import (
 
 var (
 	Server      *BlockchainServer
-	GlobalClock = 0
 )
 
 type BlockchainServer struct {
@@ -61,9 +60,6 @@ func (server *BlockchainServer) handleConnections(ctx context.Context, c net.Con
 	for {
 		err = d.Decode(&requestMsg)
 		if err != nil {
-			log.WithFields(log.Fields{
-				"error": err.Error(),
-			}).Error("error decoding request recvd from the client")
 			continue
 		}
 		log.WithFields(log.Fields{

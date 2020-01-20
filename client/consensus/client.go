@@ -7,10 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/manifoldco/promptui"
 	"net"
 	"strconv"
 	"time"
+
+	"github.com/manifoldco/promptui"
 
 	"github.com/jpillora/backoff"
 
@@ -23,7 +24,7 @@ var (
 	consensusMsgChan = make(chan *common.ConsensusEvent)
 	numMsg           = 0
 	allDoneChan      = make(chan bool)
-	//sendToServerChan = make(chan bool)
+	sendToServerChan = make(chan bool)
 	transactionStart = make(chan bool)
 )
 
@@ -60,7 +61,7 @@ func (client *BlockchainClient) handlePeerMessages(ctx context.Context, conn net
 	for {
 		err = d.Decode(&resp)
 		if err != nil {
-
+			continue
 		}
 		consensusMsgChan <- resp
 	}
@@ -129,7 +130,9 @@ func (client *BlockchainClient) processClientMessages(ctx context.Context) {
 					log.WithFields(log.Fields{
 						"client_id": client.ClientId,
 					}).Info("Received ACK from all the clients")
-					allDoneChan <- true
+					numMsg = 0
+					sendToServerChan <- true
+					//allDoneChan <- true
 					continue
 				}
 			} else if msg.Message == common.Request {
@@ -145,6 +148,8 @@ func (client *BlockchainClient) processClientMessages(ctx context.Context) {
 						PID:       client.ClientId,
 					},
 				}
+				//sleep for sometime before sending back the ack
+				time.Sleep(5 * time.Second)
 				client.sendSingleMessage(ctx, client.PeerConnMap[msg.DestClient], msg)
 				client.printRequestQ(ctx, client.Q)
 			} else if msg.Message == common.Release {
@@ -161,8 +166,8 @@ func (client *BlockchainClient) processClientMessages(ctx context.Context) {
 				client.Q.Remove(e)
 				client.printRequestQ(ctx, client.Q)
 			}
-		case <-allDoneChan:
-			numMsg = 0
+			//case <-allDoneChan:
+			//numMsg = 0
 			//sendToServerChan <- true
 			//return
 			//default:
@@ -212,21 +217,6 @@ func (client *BlockchainClient) startTransactions(ctx context.Context) {
 		receiverClientId          int
 		txn                       string
 	)
-	//for {
-	//	fmt.Println("enter the operation choice")
-	//	_, _ = fmt.Scanln(&transactionType)
-	//	switch transactionType {
-	//	case "Exit":
-	//		log.Panic("Fun doing business with you, see you soon!")
-	//		return
-	//	case "Balance":
-	//		txn = common.BalanceTxn
-	//		client.sendRequestToServer(ctx, &common.ServerRequest{
-	//			TxnType:  txn,
-	//			ClientId: client.ClientId,
-	//		}, true)
-	//	}
-	//}
 	for {
 		prompt := promptui.Select{
 			Label: "Select Transaction",
@@ -403,7 +393,7 @@ func (client *BlockchainClient) sendSingleMessage(ctx context.Context, conn net.
 		"from_client": client.ClientId,
 		"to_client":   msg.DestClient,
 		"msg":         msg,
-	}).Debug("sending response back to the peer")
+	}).Debug("sending message to the peer")
 	jMsg, _ = json.Marshal(msg)
 	_, err = conn.Write(jMsg)
 	if err != nil {
@@ -432,7 +422,7 @@ func (client *BlockchainClient) sendRequestToServer(ctx context.Context, request
 			log.Error("Consensus not reached")
 			return
 		}
-		//<-sendToServerChan
+		<-sendToServerChan
 	}
 	if client.Q.Front() != nil && client.Q.Front().Value.(*common.ConsensusEvent).SourceClient != client.ClientId {
 		log.WithFields(log.Fields{
@@ -463,10 +453,31 @@ func (client *BlockchainClient) sendRequestToServer(ctx context.Context, request
 	log.WithFields(log.Fields{
 		"msg": resp,
 	}).Debug("Received message from the server")
+	e := client.Q.Front()
+	if e != nil {
+		client.Q.Remove(e)
+	}
+	client.sendReleaseMessage(ctx)
+}
+
+func (client *BlockchainClient) sendReleaseMessage(ctx context.Context) {
+	for _, peer := range client.Peers {
+		client.sendSingleMessage(ctx, client.PeerConnMap[peer], &common.ConsensusEvent{
+			Request:      nil,
+			Message:      common.Release,
+			SourceClient: client.ClientId,
+			DestClient:   peer,
+			CurrentClock: &lamport.LamportClock{
+				Timestamp: GlobalClock,
+				PID:       client.ClientId,
+			},
+		})
+	}
 }
 
 func (client *BlockchainClient) printRequestQ(ctx context.Context, q *list.List) {
 	for block := q.Front(); block != nil; block = block.Next() {
+
 		fmt.Printf("%d -> ", block.Value.(*common.ConsensusEvent).SourceClient)
 	}
 	fmt.Println()

@@ -74,14 +74,13 @@ func (server *BlockchainServer) TransferTransaction(ctx context.Context,
 			ValidityResp: common.ValidTxn,
 			ClientId:     requestMsg.ClientId,
 		}
+		// add the new transaction to the blockchain
+		BlockChain.PushBack(&Transaction{
+			Sender: requestMsg.ClientId,
+			Recvr:  requestMsg.Rcvr,
+			Amount: requestMsg.Amount,
+		})
 	}
-	// add the new transaction to the blockchain
-	BlockChain.PushBack(&Transaction{
-		Sender: requestMsg.ClientId,
-		Recvr:  requestMsg.Rcvr,
-		Amount: requestMsg.Amount,
-	})
-
 	log.WithFields(log.Fields{
 		"client_id": requestMsg.ClientId,
 	}).Debug("Blockchain updated with transaction")
