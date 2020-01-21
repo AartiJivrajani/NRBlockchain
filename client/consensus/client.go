@@ -19,6 +19,10 @@ import (
 	log "github.com/Sirupsen/logrus"
 )
 
+// this is a comment, to be removed later.
+// for demo of git only
+// fine fine ;)
+
 var (
 	Client           *BlockchainClient
 	GlobalClock      = 0
