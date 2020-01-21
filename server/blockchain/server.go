@@ -12,7 +12,7 @@ import (
 )
 
 var (
-	Server      *BlockchainServer
+	Server *BlockchainServer
 )
 
 type BlockchainServer struct {
