@@ -1,6 +1,6 @@
 package common
 
-import "NRBlockchain/lamport"
+import "NonReplicated-Blockchain/lamport"
 
 const (
 	TransferTxn  = "Transfer"

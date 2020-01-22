@@ -1,8 +1,8 @@
 package consensus
 
 import (
-	"NRBlockchain/common"
-	"NRBlockchain/lamport"
+	"NonReplicated-Blockchain/common"
+	"NonReplicated-Blockchain/lamport"
 	"container/list"
 	"context"
 	"encoding/json"

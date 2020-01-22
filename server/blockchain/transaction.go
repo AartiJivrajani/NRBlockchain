@@ -1,7 +1,7 @@
 package blockchain
 
 import (
-	"NRBlockchain/common"
+	"NonReplicated-Blockchain/common"
 	"context"
 	"fmt"
 

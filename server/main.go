@@ -1,7 +1,7 @@
 package main
 
 import (
-	"NRBlockchain/server/blockchain"
+	"NonReplicated-Blockchain/server/blockchain"
 	"context"
 	"flag"
 	log "github.com/Sirupsen/logrus"

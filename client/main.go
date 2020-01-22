@@ -1,7 +1,7 @@
 package main
 
 import (
-	"NRBlockchain/client/consensus"
+	"NonReplicated-Blockchain/client/consensus"
 	"context"
 	"flag"
 	"os"
