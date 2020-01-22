@@ -7,10 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/manifoldco/promptui"
 	"net"
 	"strconv"
 	"time"
+
+	"github.com/manifoldco/promptui"
 
 	"github.com/jpillora/backoff"
 
@@ -23,11 +24,9 @@ var (
 	consensusMsgChan = make(chan *common.ConsensusEvent)
 	numMsg           = 0
 	allDoneChan      = make(chan bool)
-	//sendToServerChan = make(chan bool)
 	transactionStart = make(chan bool)
 )
 
-// TODO: See if the client id and the lamport clock pid can be made the same for now
 type BlockchainClient struct {
 	ClientId    int
 	PortNumber  int
@@ -124,7 +123,10 @@ func (client *BlockchainClient) processClientMessages(ctx context.Context) {
 		case msg := <-consensusMsgChan:
 			if msg.Message == common.Ack {
 				numMsg += 1
-				log.Debug("received an ack")
+				log.WithFields(log.Fields{
+					"client_id":      client.ClientId,
+					"from_client_id": msg.SourceClient,
+				}).Debug("Received an ack")
 				if numMsg >= 2 {
 					log.WithFields(log.Fields{
 						"client_id": client.ClientId,
@@ -163,10 +165,6 @@ func (client *BlockchainClient) processClientMessages(ctx context.Context) {
 			}
 		case <-allDoneChan:
 			numMsg = 0
-			//sendToServerChan <- true
-			//return
-			//default:
-			//	continue
 		}
 	}
 }
@@ -193,11 +191,11 @@ func (client *BlockchainClient) registerClients(ctx context.Context) {
 	}).Debug("Registering the clients")
 
 	if client.ClientId == 1 {
-		client.Peers = []int{2, 3} //append(client.Peers, []int{2, 3}...)
+		client.Peers = []int{2, 3}
 	} else if client.ClientId == 2 {
-		client.Peers = []int{1, 3} //append(client.Peers, []int{1, 3}...)
+		client.Peers = []int{1, 3}
 	} else if client.ClientId == 3 {
-		client.Peers = []int{1, 2} //append(client.Peers, []int{1, 2}...)
+		client.Peers = []int{1, 2}
 	}
 }
 
@@ -212,21 +210,6 @@ func (client *BlockchainClient) startTransactions(ctx context.Context) {
 		receiverClientId          int
 		txn                       string
 	)
-	//for {
-	//	fmt.Println("enter the operation choice")
-	//	_, _ = fmt.Scanln(&transactionType)
-	//	switch transactionType {
-	//	case "Exit":
-	//		log.Panic("Fun doing business with you, see you soon!")
-	//		return
-	//	case "Balance":
-	//		txn = common.BalanceTxn
-	//		client.sendRequestToServer(ctx, &common.ServerRequest{
-	//			TxnType:  txn,
-	//			ClientId: client.ClientId,
-	//		}, true)
-	//	}
-	//}
 	for {
 		prompt := promptui.Select{
 			Label: "Select Transaction",
@@ -342,7 +325,7 @@ func (client *BlockchainClient) establishPeerConnections(ctx context.Context) {
 
 // getConsensus sends a request to each client and waits for an ACK from each of them.
 // once it receives an ACK from all the clients, it checks if it is at the head of the Priority Queue
-// if yes, it makes a request to the blockchain server followed by multi-casting a release message
+// if yes, it makes a request to the block chain server followed by multi-casting a release message
 // to all the clients.
 func (client *BlockchainClient) GetConsensus(ctx context.Context, request *common.ServerRequest) error {
 	var (
@@ -354,7 +337,6 @@ func (client *BlockchainClient) GetConsensus(ctx context.Context, request *commo
 		Message:      common.Request,
 		SourceClient: client.ClientId,
 		DestClient:   0,
-		// TODO: Populate this clock correctly
 		CurrentClock: &lamport.LamportClock{
 			Timestamp: GlobalClock,
 			PID:       client.ClientId,
@@ -413,7 +395,6 @@ func (client *BlockchainClient) sendSingleMessage(ctx context.Context, conn net.
 			"to_client":   msg.DestClient,
 			"msg":         msg,
 		}).Error("error writing msg to the client socket")
-		// TODO: Backoff and retry?
 		return
 	}
 	client.updateGlobalClock(ctx, msg)
@@ -432,7 +413,6 @@ func (client *BlockchainClient) sendRequestToServer(ctx context.Context, request
 			log.Error("Consensus not reached")
 			return
 		}
-		//<-sendToServerChan
 	}
 	if client.Q.Front() != nil && client.Q.Front().Value.(*common.ConsensusEvent).SourceClient != client.ClientId {
 		log.WithFields(log.Fields{
@@ -460,9 +440,15 @@ func (client *BlockchainClient) sendRequestToServer(ctx context.Context, request
 		}).Error("error connecting to the TCP socket to initiate the read, shutting down...")
 		return
 	}
-	log.WithFields(log.Fields{
-		"msg": resp,
-	}).Debug("Received message from the server")
+	if resp.TxnType == common.TransferTxn {
+		log.WithFields(log.Fields{
+			"Transaction Status": resp.ValidityResp,
+		}).Info("Transfer txn validity from the server")
+	} else if resp.TxnType == common.BalanceTxn {
+		log.WithFields(log.Fields{
+			"Balance": resp.BalanceAmt,
+		}).Info("Server response for balance txn")
+	}
 }
 
 func (client *BlockchainClient) printRequestQ(ctx context.Context, q *list.List) {

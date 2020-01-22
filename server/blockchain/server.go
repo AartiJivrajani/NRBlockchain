@@ -12,8 +12,7 @@ import (
 )
 
 var (
-	Server      *BlockchainServer
-	GlobalClock = 0
+	Server *BlockchainServer
 )
 
 type BlockchainServer struct {
