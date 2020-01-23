@@ -30,7 +30,6 @@ var (
 	clockLock        sync.Mutex
 )
 
-// TODO: See if the client id and the lamport clock pid can be made the same for now
 type BlockchainClient struct {
 	ClientId   int
 	PortNumber int
@@ -160,7 +159,10 @@ func (client *BlockchainClient) processClientMessages(ctx context.Context) {
 		case msg := <-consensusMsgChan:
 			if msg.Message == common.Ack {
 				numMsg += 1
-				log.Debug("received an ack")
+				log.WithFields(log.Fields{
+					"client_id":      client.ClientId,
+					"from_client_id": msg.SourceClient,
+				}).Info("received an ACK")
 				if numMsg >= 2 {
 					log.WithFields(log.Fields{
 						"client_id": client.ClientId,
@@ -296,7 +298,6 @@ func (client *BlockchainClient) startTransactions(ctx context.Context) {
 			txn = common.TransferTxn
 			prompt := promptui.Prompt{
 				Label: "Receiver Client",
-				//Validate: validate,
 			}
 			receiverClient, err = prompt.Run()
 			if err != nil {
@@ -393,7 +394,6 @@ func (client *BlockchainClient) GetConsensus(ctx context.Context, request *commo
 		Message:      common.Request,
 		SourceClient: client.ClientId,
 		DestClient:   0,
-		// TODO: Populate this clock correctly
 		CurrentClock: &lamport.LamportClock{
 			Timestamp: GlobalClock,
 			PID:       client.ClientId,
@@ -541,16 +541,21 @@ func (client *BlockchainClient) sendRequestToServer(ctx context.Context, request
 		}).Error("error connecting to the TCP socket to initiate the read, shutting down...")
 		return
 	}
-	log.WithFields(log.Fields{
-		"msg": resp,
-	}).Debug("Received message from the server")
-
+	if resp.TxnType == common.TransferTxn {
+		log.WithFields(log.Fields{
+			"Transaction Status": resp.ValidityResp,
+		}).Info("Transfer txn validity from the server")
+	} else if resp.TxnType == common.BalanceTxn {
+		log.WithFields(log.Fields{
+			"Balance": resp.BalanceAmt,
+		}).Info("Server response for balance txn")
+	}
 	QLock.Lock()
 	e := client.Q.Front()
 	if e != nil {
-		log.WithFields(log.Fields{
-			"q": client.printRequestQ(ctx),
-		}).Info("removing head from Q")
+		//log.WithFields(log.Fields{
+		//	"q": client.printRequestQ(ctx),
+		//}).Info("removing head from Q")
 		client.Q.Remove(e)
 		log.WithFields(log.Fields{
 			"q": client.printRequestQ(ctx),
