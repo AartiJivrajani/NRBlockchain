@@ -9,14 +9,16 @@ import (
 )
 
 func (server *BlockchainServer) PrintBlockChain() {
-	log.Debug("Current blockchain")
+	log.Info("=============================================================================================")
+	log.Info("Current blockchain")
 	for block := BlockChain.Front(); block != nil; block = block.Next() {
-		fmt.Printf("Sender: %d, ", block.Value.(*Transaction).Sender)
-		fmt.Printf("Receiver: %d, ", block.Value.(*Transaction).Recvr)
-		fmt.Printf("Amount: %f ", block.Value.(*Transaction).Amount)
-		fmt.Printf(" ||| ")
+		fmt.Printf("Sender: %d,", block.Value.(*Transaction).Sender)
+		fmt.Printf("Receiver: %d,", block.Value.(*Transaction).Recvr)
+		fmt.Printf("Amount: %f", block.Value.(*Transaction).Amount)
+		fmt.Printf("->")
 	}
 	fmt.Println("\n")
+	log.Info("=============================================================================================")
 }
 
 func (server *BlockchainServer) GetBalance(ctx context.Context,
@@ -26,7 +28,7 @@ func (server *BlockchainServer) GetBalance(ctx context.Context,
 		balance float64
 	)
 	if BlockChain.Front() == nil {
-		log.Error("no blocks in the chain!")
+		//log.Error("no blocks in the chain!")
 		return float64(10), nil
 	}
 	balance = 10
