@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -20,14 +21,16 @@ import (
 )
 
 var (
-	Client           *BlockchainClient
-	GlobalClock      = 0
-	consensusMsgChan = make(chan *common.ConsensusEvent)
-	numMsg           = 0
-	sendToServerChan = make(chan bool)
-	transactionStart = make(chan bool)
-	QLock            sync.Mutex
-	clockLock        sync.Mutex
+	Client              *BlockchainClient
+	GlobalClock         = 0
+	consensusMsgChan    = make(chan *common.ConsensusEvent)
+	numMsg              = 0
+	sendToServerChan    = make(chan bool)
+	transactionStart    = make(chan bool)
+	QLock               sync.Mutex
+	clockLock           sync.Mutex
+	showNextPrompt      = make(chan bool)
+	allowHeadProcessing bool
 )
 
 type BlockchainClient struct {
@@ -159,21 +162,28 @@ func (client *BlockchainClient) processClientMessages(ctx context.Context) {
 		case msg := <-consensusMsgChan:
 			if msg.Message == common.Ack {
 				numMsg += 1
-				log.WithFields(log.Fields{
-					"client_id":      client.ClientId,
-					"from_client_id": msg.SourceClient,
-				}).Info("received an ACK")
+				//log.WithFields(log.Fields{
+				//	"client_id":      client.ClientId,
+				//	"from_client_id": msg.SourceClient,
+				//}).Info("received an ACK")
 				if numMsg >= 2 {
-					log.WithFields(log.Fields{
-						"client_id": client.ClientId,
-					}).Info("Received ACK from all the clients")
+					//log.WithFields(log.Fields{
+					//	"client_id": client.ClientId,
+					//}).Info("Received ACK from all the clients")
 					numMsg = 0
 					sendToServerChan <- true
+					showNextPrompt <- true
+					allowHeadProcessing = true
 					continue
+				} else {
+					allowHeadProcessing = false
 				}
 			} else if msg.Message == common.Request {
 				// process the request received from the other clients
-				log.Debug("received request from peer")
+				log.WithFields(log.Fields{
+					"from_client_id": msg.SourceClient,
+					"client_id":      client.ClientId,
+				}).Debug("received request from peer")
 				client.updateGlobalClock(ctx, msg)
 				QLock.Lock()
 				client.AddToQ(ctx, msg)
@@ -181,6 +191,7 @@ func (client *BlockchainClient) processClientMessages(ctx context.Context) {
 
 				// send an ACK message to the requesting client.
 				ackMsg := &common.ConsensusEvent{
+					Request:      msg.Request,
 					Message:      common.Ack,
 					SourceClient: client.ClientId,
 					DestClient:   msg.SourceClient,
@@ -195,9 +206,9 @@ func (client *BlockchainClient) processClientMessages(ctx context.Context) {
 
 			} else if msg.Message == common.Release {
 				log.WithFields(log.Fields{
-					"client_id":   client.ClientId,
-					"from_client": msg.SourceClient,
-					"list":        client.printRequestQ(ctx),
+					"client_id":      client.ClientId,
+					"from_client_id": msg.SourceClient,
+					"list":           client.printRequestQ(ctx),
 				}).Debug("Release message received")
 				client.updateGlobalClock(ctx, msg)
 
@@ -208,11 +219,6 @@ func (client *BlockchainClient) processClientMessages(ctx context.Context) {
 					client.Q.Remove(e)
 				}
 				QLock.Unlock()
-				log.WithFields(log.Fields{
-					"client_id":   client.ClientId,
-					"from_client": msg.SourceClient,
-					"list":        client.printRequestQ(ctx),
-				}).Debug("Release message received")
 				// once a release message is received, check the head of the queue,
 				// if it is the same as the client, the client has the lock on the resource
 				if client.Q.Front() != nil && client.Q.Front().Value.(*common.ConsensusEvent).SourceClient == client.ClientId {
@@ -286,8 +292,9 @@ func (client *BlockchainClient) startTransactions(ctx context.Context) {
 		}).Debug("You choose...")
 		switch transactionType {
 		case "Exit":
-			log.Panic("Fun doing business with you, see you soon!")
-			return
+			log.Debug("Fun doing business with you, see you soon!")
+			os.Exit(0)
+
 		case "Show Balance":
 			txn = common.BalanceTxn
 			client.sendRequestToServer(ctx, &common.ServerRequest{
@@ -330,6 +337,7 @@ func (client *BlockchainClient) startTransactions(ctx context.Context) {
 				Rcvr:     receiverClientId,
 			}, true)
 		}
+		<-showNextPrompt
 	}
 }
 
@@ -410,8 +418,8 @@ func (client *BlockchainClient) GetConsensus(ctx context.Context, request *commo
 			return fmt.Errorf("no pre-established connection found")
 		}
 		log.WithFields(log.Fields{
-			"client_id":             client.ClientId,
-			"destination_client_id": peer,
+			"from_client_id": client.ClientId,
+			"to_client_id":   peer,
 		}).Info("Sending Request to clients")
 
 		consensusReq.DestClient = peer
@@ -419,9 +427,9 @@ func (client *BlockchainClient) GetConsensus(ctx context.Context, request *commo
 		_, err = client.PeerConnMap[peer].Write(cReq)
 		if err != nil {
 			log.WithFields(log.Fields{
-				"client":             client.ClientId,
-				"destination_client": peer,
-				"error":              err.Error(),
+				"from_client_id": client.ClientId,
+				"to_client_id":   peer,
+				"error":          err.Error(),
 			}).Panic("error writing to the destination client")
 		}
 
@@ -446,9 +454,9 @@ func (client *BlockchainClient) sendSingleMessage(ctx context.Context, conn net.
 		}
 	)
 	log.WithFields(log.Fields{
-		"from_client": client.ClientId,
-		"to_client":   msg.DestClient,
-		"msg":         msg,
+		"from_client_id": client.ClientId,
+		"to_client_id":   msg.DestClient,
+		"msg":            msg,
 	}).Debug("sending message to the peer")
 	d = b.Duration()
 	jMsg, _ = json.Marshal(msg)
@@ -456,10 +464,10 @@ func (client *BlockchainClient) sendSingleMessage(ctx context.Context, conn net.
 		_, err = conn.Write(jMsg)
 		if err != nil {
 			log.WithFields(log.Fields{
-				"error":       err.Error(),
-				"from_client": client.ClientId,
-				"to_client":   msg.DestClient,
-				"msg":         msg,
+				"error":          err.Error(),
+				"from_client_id": client.ClientId,
+				"to_client_id":   msg.DestClient,
+				"msg":            msg,
 			}).Error("error writing msg to the client socket")
 			if b.Attempt() <= 3 {
 				time.Sleep(d)
@@ -496,16 +504,6 @@ func (client *BlockchainClient) sendRequestToServer(ctx context.Context, request
 			},
 		},
 		)
-		//client.Q.PushBack(&common.ConsensusEvent{
-		//	Request:      request,
-		//	Message:      common.Request,
-		//	SourceClient: client.ClientId,
-		//	DestClient:   0,
-		//	CurrentClock: &lamport.LamportClock{
-		//		Timestamp: GlobalClock,
-		//		PID:       client.ClientId,
-		//	},
-		//})
 		QLock.Unlock()
 		err = client.GetConsensus(ctx, request)
 		if err != nil {
@@ -514,13 +512,25 @@ func (client *BlockchainClient) sendRequestToServer(ctx context.Context, request
 		}
 		<-sendToServerChan
 	}
+
 	if client.Q.Front() != nil && client.Q.Front().Value.(*common.ConsensusEvent).SourceClient != client.ClientId {
 		log.WithFields(log.Fields{
 			"client_id": client.ClientId,
 			"list":      client.printRequestQ(ctx),
 		}).Debug("Received all ACKs, but critical section cant be accessed just yet.")
 		return
-	}
+	} /*else {
+		for {
+			if client.Q.Front() != nil && client.Q.Front().Value.(*common.ConsensusEvent).SourceClient == client.ClientId {
+				if allowHeadProcessing {
+					break
+				} else {
+					log.Debug("haven't received all the ACKS yet, lets wait for them to come")
+					time.Sleep(2 * time.Second)
+				}
+			}
+		}
+	}*/
 	PORT := ":" + strconv.Itoa(common.ServerPort)
 	conn, err = net.Dial("tcp", PORT)
 	if err != nil {
@@ -532,6 +542,7 @@ func (client *BlockchainClient) sendRequestToServer(ctx context.Context, request
 	}
 	client.updateGlobalClock(ctx, nil)
 	jReq, _ = json.Marshal(request)
+	log.Info("Sending request to server")
 	conn.Write(jReq)
 	d := json.NewDecoder(conn)
 	err = d.Decode(&resp)
@@ -542,13 +553,17 @@ func (client *BlockchainClient) sendRequestToServer(ctx context.Context, request
 		return
 	}
 	if resp.TxnType == common.TransferTxn {
+		log.Info("=============================================================================================")
 		log.WithFields(log.Fields{
 			"Transaction Status": resp.ValidityResp,
-		}).Info("Transfer txn validity from the server")
+		}).Info("TRANSFER TRANSACTION VALIDITY FROM SERVER")
+		log.Info("=============================================================================================")
 	} else if resp.TxnType == common.BalanceTxn {
+		log.Info("=============================================================================================")
 		log.WithFields(log.Fields{
 			"Balance": resp.BalanceAmt,
-		}).Info("Server response for balance txn")
+		}).Info("SERVER RESPONSE FOR BALANCE TRANSACTION")
+		log.Info("=============================================================================================")
 	}
 	QLock.Lock()
 	e := client.Q.Front()
@@ -563,7 +578,6 @@ func (client *BlockchainClient) sendRequestToServer(ctx context.Context, request
 	}
 	QLock.Unlock()
 	client.sendReleaseMessage(ctx)
-
 }
 
 func (client *BlockchainClient) sendReleaseMessage(ctx context.Context) {
@@ -584,7 +598,10 @@ func (client *BlockchainClient) sendReleaseMessage(ctx context.Context) {
 func (client *BlockchainClient) printRequestQ(ctx context.Context) string {
 	var l string
 	for block := client.Q.Front(); block != nil; block = block.Next() {
-		l = l + strconv.Itoa(block.Value.(*common.ConsensusEvent).SourceClient) + "(" + strconv.Itoa(block.Value.(*common.ConsensusEvent).CurrentClock.Timestamp) + ")" + " -> "
+		l = l + strconv.Itoa(block.Value.(*common.ConsensusEvent).SourceClient) + "(" + strconv.Itoa(block.Value.(*common.ConsensusEvent).CurrentClock.Timestamp) + ")"
+		if block.Next() != nil {
+			l = l + "->"
+		}
 	}
 	return l
 }
