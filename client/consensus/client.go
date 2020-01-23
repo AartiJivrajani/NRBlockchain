@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/manifoldco/promptui"
@@ -23,17 +24,22 @@ var (
 	GlobalClock      = 0
 	consensusMsgChan = make(chan *common.ConsensusEvent)
 	numMsg           = 0
-	allDoneChan      = make(chan bool)
+	sendToServerChan = make(chan bool)
 	transactionStart = make(chan bool)
+	QLock            sync.Mutex
+	clockLock        sync.Mutex
 )
 
+// TODO: See if the client id and the lamport clock pid can be made the same for now
 type BlockchainClient struct {
-	ClientId    int
-	PortNumber  int
-	Clock       *lamport.LamportClock
-	Q           *list.List
+	ClientId   int
+	PortNumber int
+	Clock      *lamport.LamportClock
+	Q          *list.List
+
 	Peers       []int
 	PeerConnMap map[int]net.Conn
+	index       int
 }
 
 func GetClient(ctx context.Context, clientId int, portNumber int) *BlockchainClient {
@@ -52,14 +58,14 @@ func GetClient(ctx context.Context, clientId int, portNumber int) *BlockchainCli
 
 func (client *BlockchainClient) handlePeerMessages(ctx context.Context, conn net.Conn) {
 	var (
-		resp *common.ConsensusEvent
-		err  error
+		err error
 	)
 	d := json.NewDecoder(conn)
 	for {
+		var resp *common.ConsensusEvent
 		err = d.Decode(&resp)
 		if err != nil {
-
+			continue
 		}
 		consensusMsgChan <- resp
 	}
@@ -69,7 +75,7 @@ func (client *BlockchainClient) handlePeerConnections(ctx context.Context, liste
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-
+			continue
 		}
 		go client.handlePeerMessages(ctx, conn)
 	}
@@ -98,11 +104,11 @@ func (client *BlockchainClient) startPeerListener(ctx context.Context) {
 
 func (client *BlockchainClient) updateGlobalClock(ctx context.Context, msg *common.ConsensusEvent) {
 	// in case of client sending a message to the server, the consensus event will be nil
+	clockLock.Lock()
 	if msg == nil {
 		GlobalClock += 1
 	} else {
 		msgClock := msg.CurrentClock.Timestamp
-		// TODO: Take care of the case when msgClock == GlobalClock
 		if msgClock > GlobalClock {
 			GlobalClock = msgClock + 1
 		} else {
@@ -112,7 +118,38 @@ func (client *BlockchainClient) updateGlobalClock(ctx context.Context, msg *comm
 	log.WithFields(log.Fields{
 		"client_id": client.ClientId,
 		"clock":     GlobalClock,
-	}).Debug("updated the clock")
+	}).Info("updated the clock")
+	clockLock.Unlock()
+}
+
+func (client *BlockchainClient) AddToQ(ctx context.Context, msg *common.ConsensusEvent) {
+	insertFront := true
+	log.WithFields(log.Fields{
+		"q": client.printRequestQ(ctx),
+	}).Debug("before insertion")
+	for el := client.Q.Back(); el != nil; el = el.Prev() {
+		if msg.CurrentClock.Timestamp > el.Value.(*common.ConsensusEvent).CurrentClock.Timestamp {
+			client.Q.InsertAfter(msg, el)
+			insertFront = false
+			break
+		} else if msg.CurrentClock.Timestamp < el.Value.(*common.ConsensusEvent).CurrentClock.Timestamp {
+			continue
+		} else if msg.CurrentClock.Timestamp == el.Value.(*common.ConsensusEvent).CurrentClock.Timestamp {
+			if msg.CurrentClock.PID < el.Value.(*common.ConsensusEvent).CurrentClock.PID {
+				continue
+			} else if msg.CurrentClock.PID > el.Value.(*common.ConsensusEvent).CurrentClock.PID {
+				insertFront = false
+				client.Q.InsertAfter(msg, el)
+				break
+			}
+		}
+	}
+	if insertFront {
+		client.Q.PushFront(msg)
+	}
+	log.WithFields(log.Fields{
+		"q": client.printRequestQ(ctx),
+	}).Debug("after insertion")
 }
 
 // processClientMessages essentially gathers all the messages a client may receive...
@@ -123,22 +160,25 @@ func (client *BlockchainClient) processClientMessages(ctx context.Context) {
 		case msg := <-consensusMsgChan:
 			if msg.Message == common.Ack {
 				numMsg += 1
-				log.WithFields(log.Fields{
-					"client_id":      client.ClientId,
-					"from_client_id": msg.SourceClient,
-				}).Debug("Received an ack")
+				log.Debug("received an ack")
 				if numMsg >= 2 {
 					log.WithFields(log.Fields{
 						"client_id": client.ClientId,
 					}).Info("Received ACK from all the clients")
-					allDoneChan <- true
+					numMsg = 0
+					sendToServerChan <- true
 					continue
 				}
 			} else if msg.Message == common.Request {
 				// process the request received from the other clients
-				client.Q.PushBack(msg)
+				log.Debug("received request from peer")
+				client.updateGlobalClock(ctx, msg)
+				QLock.Lock()
+				client.AddToQ(ctx, msg)
+				QLock.Unlock()
+
 				// send an ACK message to the requesting client.
-				msg := &common.ConsensusEvent{
+				ackMsg := &common.ConsensusEvent{
 					Message:      common.Ack,
 					SourceClient: client.ClientId,
 					DestClient:   msg.SourceClient,
@@ -147,24 +187,41 @@ func (client *BlockchainClient) processClientMessages(ctx context.Context) {
 						PID:       client.ClientId,
 					},
 				}
-				client.sendSingleMessage(ctx, client.PeerConnMap[msg.DestClient], msg)
-				client.printRequestQ(ctx, client.Q)
+				//sleep for sometime before sending back the ack
+				time.Sleep(5 * time.Second)
+				client.sendSingleMessage(ctx, client.PeerConnMap[ackMsg.DestClient], ackMsg)
+
 			} else if msg.Message == common.Release {
-				log.Debug("Release message received")
+				log.WithFields(log.Fields{
+					"client_id":   client.ClientId,
+					"from_client": msg.SourceClient,
+					"list":        client.printRequestQ(ctx),
+				}).Debug("Release message received")
 				client.updateGlobalClock(ctx, msg)
+
+				// remove the first element from the list
+				QLock.Lock()
+				e := client.Q.Front()
+				if e != nil {
+					client.Q.Remove(e)
+				}
+				QLock.Unlock()
+				log.WithFields(log.Fields{
+					"client_id":   client.ClientId,
+					"from_client": msg.SourceClient,
+					"list":        client.printRequestQ(ctx),
+				}).Debug("Release message received")
 				// once a release message is received, check the head of the queue,
 				// if it is the same as the client, the client has the lock on the resource
-				if client.Q.Front().Value.(*common.ConsensusEvent).SourceClient == client.ClientId {
+				if client.Q.Front() != nil && client.Q.Front().Value.(*common.ConsensusEvent).SourceClient == client.ClientId {
 					log.Debug("client found itself in front of the q... sending request to server")
 					client.sendRequestToServer(ctx, client.Q.Front().Value.(*common.ConsensusEvent).Request, false)
 				}
-				// remove the first element from the list
-				e := client.Q.Front()
-				client.Q.Remove(e)
-				client.printRequestQ(ctx, client.Q)
+				log.WithFields(log.Fields{
+					"list":      client.printRequestQ(ctx),
+					"client_id": client.ClientId,
+				}).Debug("after release request processing")
 			}
-		case <-allDoneChan:
-			numMsg = 0
 		}
 	}
 }
@@ -178,7 +235,6 @@ func (client *BlockchainClient) Start(ctx context.Context) {
 	go client.startPeerListener(ctx)
 	client.establishPeerConnections(ctx)
 	// wait for the peer listener to start before we allow the transactions to begin
-	//<-transactionStart
 	go client.processClientMessages(ctx)
 	go client.startTransactions(ctx)
 }
@@ -325,7 +381,7 @@ func (client *BlockchainClient) establishPeerConnections(ctx context.Context) {
 
 // getConsensus sends a request to each client and waits for an ACK from each of them.
 // once it receives an ACK from all the clients, it checks if it is at the head of the Priority Queue
-// if yes, it makes a request to the block chain server followed by multi-casting a release message
+// if yes, it makes a request to the blockchain server followed by multi-casting a release message
 // to all the clients.
 func (client *BlockchainClient) GetConsensus(ctx context.Context, request *common.ServerRequest) error {
 	var (
@@ -337,6 +393,7 @@ func (client *BlockchainClient) GetConsensus(ctx context.Context, request *commo
 		Message:      common.Request,
 		SourceClient: client.ClientId,
 		DestClient:   0,
+		// TODO: Populate this clock correctly
 		CurrentClock: &lamport.LamportClock{
 			Timestamp: GlobalClock,
 			PID:       client.ClientId,
@@ -380,22 +437,40 @@ func (client *BlockchainClient) sendSingleMessage(ctx context.Context, conn net.
 	var (
 		jMsg []byte
 		err  error
+		d    time.Duration
+		b    = &backoff.Backoff{
+			Min:    1 * time.Second,
+			Max:    10 * time.Minute,
+			Factor: 2,
+			Jitter: true,
+		}
 	)
 	log.WithFields(log.Fields{
 		"from_client": client.ClientId,
 		"to_client":   msg.DestClient,
 		"msg":         msg,
-	}).Debug("sending response back to the peer")
+	}).Debug("sending message to the peer")
+	d = b.Duration()
 	jMsg, _ = json.Marshal(msg)
-	_, err = conn.Write(jMsg)
-	if err != nil {
-		log.WithFields(log.Fields{
-			"error":       err.Error(),
-			"from_client": client.ClientId,
-			"to_client":   msg.DestClient,
-			"msg":         msg,
-		}).Error("error writing msg to the client socket")
-		return
+	for {
+		_, err = conn.Write(jMsg)
+		if err != nil {
+			log.WithFields(log.Fields{
+				"error":       err.Error(),
+				"from_client": client.ClientId,
+				"to_client":   msg.DestClient,
+				"msg":         msg,
+			}).Error("error writing msg to the client socket")
+			if b.Attempt() <= 3 {
+				time.Sleep(d)
+				continue
+			} else {
+				log.Panic("Unable to connect to the peers")
+				break
+			}
+		} else {
+			break
+		}
 	}
 	client.updateGlobalClock(ctx, msg)
 }
@@ -408,15 +483,41 @@ func (client *BlockchainClient) sendRequestToServer(ctx context.Context, request
 		resp *common.ServerResponse
 	)
 	if checkForLock {
+		// push this client request to its own queue
+		QLock.Lock()
+		client.AddToQ(ctx, &common.ConsensusEvent{
+			Request:      request,
+			Message:      common.Request,
+			SourceClient: client.ClientId,
+			DestClient:   0,
+			CurrentClock: &lamport.LamportClock{
+				Timestamp: GlobalClock,
+				PID:       client.ClientId,
+			},
+		},
+		)
+		//client.Q.PushBack(&common.ConsensusEvent{
+		//	Request:      request,
+		//	Message:      common.Request,
+		//	SourceClient: client.ClientId,
+		//	DestClient:   0,
+		//	CurrentClock: &lamport.LamportClock{
+		//		Timestamp: GlobalClock,
+		//		PID:       client.ClientId,
+		//	},
+		//})
+		QLock.Unlock()
 		err = client.GetConsensus(ctx, request)
 		if err != nil {
 			log.Error("Consensus not reached")
 			return
 		}
+		<-sendToServerChan
 	}
 	if client.Q.Front() != nil && client.Q.Front().Value.(*common.ConsensusEvent).SourceClient != client.ClientId {
 		log.WithFields(log.Fields{
 			"client_id": client.ClientId,
+			"list":      client.printRequestQ(ctx),
 		}).Debug("Received all ACKs, but critical section cant be accessed just yet.")
 		return
 	}
@@ -440,20 +541,45 @@ func (client *BlockchainClient) sendRequestToServer(ctx context.Context, request
 		}).Error("error connecting to the TCP socket to initiate the read, shutting down...")
 		return
 	}
-	if resp.TxnType == common.TransferTxn {
+	log.WithFields(log.Fields{
+		"msg": resp,
+	}).Debug("Received message from the server")
+
+	QLock.Lock()
+	e := client.Q.Front()
+	if e != nil {
 		log.WithFields(log.Fields{
-			"Transaction Status": resp.ValidityResp,
-		}).Info("Transfer txn validity from the server")
-	} else if resp.TxnType == common.BalanceTxn {
+			"q": client.printRequestQ(ctx),
+		}).Info("removing head from Q")
+		client.Q.Remove(e)
 		log.WithFields(log.Fields{
-			"Balance": resp.BalanceAmt,
-		}).Info("Server response for balance txn")
+			"q": client.printRequestQ(ctx),
+		}).Info("removed head from Q")
+	}
+	QLock.Unlock()
+	client.sendReleaseMessage(ctx)
+
+}
+
+func (client *BlockchainClient) sendReleaseMessage(ctx context.Context) {
+	for _, peer := range client.Peers {
+		client.sendSingleMessage(ctx, client.PeerConnMap[peer], &common.ConsensusEvent{
+			Request:      nil,
+			Message:      common.Release,
+			SourceClient: client.ClientId,
+			DestClient:   peer,
+			CurrentClock: &lamport.LamportClock{
+				Timestamp: GlobalClock,
+				PID:       client.ClientId,
+			},
+		})
 	}
 }
 
-func (client *BlockchainClient) printRequestQ(ctx context.Context, q *list.List) {
-	for block := q.Front(); block != nil; block = block.Next() {
-		fmt.Printf("%d -> ", block.Value.(*common.ConsensusEvent).SourceClient)
+func (client *BlockchainClient) printRequestQ(ctx context.Context) string {
+	var l string
+	for block := client.Q.Front(); block != nil; block = block.Next() {
+		l = l + strconv.Itoa(block.Value.(*common.ConsensusEvent).SourceClient) + "(" + strconv.Itoa(block.Value.(*common.ConsensusEvent).CurrentClock.Timestamp) + ")" + " -> "
 	}
-	fmt.Println()
+	return l
 }
