@@ -162,14 +162,7 @@ func (client *BlockchainClient) processClientMessages(ctx context.Context) {
 		case msg := <-consensusMsgChan:
 			if msg.Message == common.Ack {
 				numMsg += 1
-				//log.WithFields(log.Fields{
-				//	"client_id":      client.ClientId,
-				//	"from_client_id": msg.SourceClient,
-				//}).Info("received an ACK")
 				if numMsg >= 2 {
-					//log.WithFields(log.Fields{
-					//	"client_id": client.ClientId,
-					//}).Info("Received ACK from all the clients")
 					numMsg = 0
 					sendToServerChan <- true
 					showNextPrompt <- true
@@ -519,18 +512,7 @@ func (client *BlockchainClient) sendRequestToServer(ctx context.Context, request
 			"list":      client.printRequestQ(ctx),
 		}).Debug("Received all ACKs, but critical section cant be accessed just yet.")
 		return
-	} /*else {
-		for {
-			if client.Q.Front() != nil && client.Q.Front().Value.(*common.ConsensusEvent).SourceClient == client.ClientId {
-				if allowHeadProcessing {
-					break
-				} else {
-					log.Debug("haven't received all the ACKS yet, lets wait for them to come")
-					time.Sleep(2 * time.Second)
-				}
-			}
-		}
-	}*/
+	}
 	PORT := ":" + strconv.Itoa(common.ServerPort)
 	conn, err = net.Dial("tcp", PORT)
 	if err != nil {
